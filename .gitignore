@@ -1,0 +1,28 @@
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+.streamlit/secrets.toml
+
+# Python environments and generated files
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Downloaded model weights and caches
+models/
+model_cache/
+.cache/
+hf_cache/
+**/huggingface/
+
+# Local audio output and editor files
+*.wav
+*.mp3
+.vscode/
+.idea/

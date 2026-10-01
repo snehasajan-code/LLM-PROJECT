@@ -1,0 +1,8 @@
+streamlit
+requests
+faster-whisper
+numpy
+edge-tts
+torch
+transformers
+sentencepiece
