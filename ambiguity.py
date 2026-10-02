@@ -1,4 +1,3 @@
-import requests
 import json
 
 
@@ -114,48 +113,40 @@ If there is no genuine ambiguity, return:
 Return ONLY valid JSON.
 """
 
-    response = requests.post(
-        OLLAMA_URL,
-        json={
-            "model": AMBIGUITY_MODEL,
-            "prompt": prompt,
-            "stream": False,
-            "format": "json",
-            "options": {
-                "temperature": 0.0
-            }
-        },
-        timeout=180
-    )
-
-    if response.status_code != 200:
-        raise Exception(
-            f"Ollama ambiguity detection error: {response.text}"
-        )
-
-    result = response.json()
-
-    raw_response = result.get(
-        "response",
-        ""
-    ).strip()
-
     try:
-        data = json.loads(raw_response)
+        import requests
 
-    except json.JSONDecodeError:
-
-        start = raw_response.find("{")
-        end = raw_response.rfind("}")
-
-        if start == -1 or end == -1:
-            raise Exception(
-                "Ambiguity detector returned invalid JSON."
-            )
-
-        data = json.loads(
-            raw_response[start:end + 1]
+        response = requests.post(
+            OLLAMA_URL,
+            json={
+                "model": AMBIGUITY_MODEL,
+                "prompt": prompt,
+                "stream": False,
+                "format": "json",
+                "options": {"temperature": 0.0},
+            },
+            timeout=45,
         )
+        response.raise_for_status()
+        raw_response = response.json().get("response", "").strip()
+        try:
+            data = json.loads(raw_response)
+        except json.JSONDecodeError:
+            start, end = raw_response.find("{"), raw_response.rfind("}")
+            if start < 0 or end <= start:
+                raise ValueError("Ambiguity detector returned invalid JSON.")
+            data = json.loads(raw_response[start:end + 1])
+    except Exception as exc:
+        # Translation can continue without ambiguity evidence. Callers must
+        # treat this as unknown, not as evidence that the sentence is unambiguous.
+        return {
+            "ambiguous": False,
+            "available": False,
+            "reason": "",
+            "interpretations": [],
+            "semantic_constraints": [],
+            "error": str(exc),
+        }
 
     ambiguous = bool(
         data.get("ambiguous", False)
@@ -201,6 +192,7 @@ Return ONLY valid JSON.
     if not ambiguous:
         return {
             "ambiguous": False,
+            "available": True,
             "reason": "",
             "interpretations": [],
             "semantic_constraints": []
@@ -213,6 +205,7 @@ Return ONLY valid JSON.
     ):
         return {
             "ambiguous": False,
+            "available": True,
             "reason": "",
             "interpretations": [],
             "semantic_constraints": []
@@ -220,6 +213,7 @@ Return ONLY valid JSON.
 
     return {
         "ambiguous": True,
+        "available": True,
         "reason": reason,
         "interpretations": interpretations,
         "semantic_constraints": semantic_constraints

@@ -2107,10 +2107,14 @@ with text_tab:
 
 
                 except Exception as e:
-
-                    st.error(
-                        f"Ambiguity detection failed: {e}"
-                    )
+                    st.session_state.ambiguity_result = {
+                        "ambiguous": False,
+                        "available": False,
+                        "reason": "",
+                        "interpretations": [],
+                        "semantic_constraints": [],
+                        "error": str(e),
+                    }
 
 
     st.markdown(
@@ -2129,6 +2133,12 @@ with text_tab:
 
 
     if ambiguity_result:
+
+        if ambiguity_result.get("available") is False:
+            st.warning(
+                "Ambiguity detection is unavailable because Ollama did not respond. "
+                "Continuing without a selected meaning; please review the translation."
+            )
 
         if ambiguity_result.get(
             "ambiguous",
@@ -3004,15 +3014,19 @@ with voice_tab:
                                     )
                                 )
 
+                                voice_result["ambiguity_result"] = voice_ambiguity
+
+                                if voice_ambiguity.get("available") is False:
+                                    st.warning(
+                                        "Ollama is unavailable, so ambiguity detection was skipped. "
+                                        "Continuing with translation; please review the result."
+                                    )
+
 
                                 if voice_ambiguity.get(
                                     "ambiguous",
                                     False
                                 ):
-
-                                    voice_result[
-                                        "ambiguity_result"
-                                    ] = voice_ambiguity
 
                                     st.warning(
                                         "⚠️ Ambiguity detected. "
