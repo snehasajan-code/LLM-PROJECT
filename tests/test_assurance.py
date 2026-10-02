@@ -35,7 +35,7 @@ class RiskAndEvaluationTests(unittest.TestCase):
     def test_evaluator_reports_selected_interpretation_when_clarified(self):
         result = evaluator.evaluate_translation(
             "I saw her duck.", "target translation", "English", "Malayalam",
-            clarification="I saw her duck, the bird.",
+            clarification="I saw the duck that belongs to her.",
             verification={"status": "PASS", "meaning_preserved": True,
                           "selected_meaning_preserved": True},
         )
@@ -74,7 +74,7 @@ class VerificationTests(unittest.TestCase):
         self.assertEqual(result["status"], "PASS")
         self.assertEqual(result["risk_index"]["score"], 10)
         self.assertEqual(semantic.call_args.kwargs["resolved_reference"],
-                         "I saw her duck, the bird.")
+                         "I saw the duck that belongs to her.")
 
 
 class SourceNormalizationTests(unittest.TestCase):
@@ -118,16 +118,19 @@ class SourceNormalizationTests(unittest.TestCase):
         self.assertEqual(generated["max_new_tokens"], 64)
 
     def test_clarification_is_naturalized_before_nllb(self):
-        mock_requests = SimpleNamespace(post=lambda *args, **kwargs: SimpleNamespace(
-            raise_for_status=lambda: None,
-            json=lambda: {"response": "I saw the duck that belongs to her."},
-        ))
-        with patch.dict(sys.modules, {"requests": mock_requests}):
-            normalized = translator.normalize_clarification(
-                "I saw her duck.", "I saw her duck, the bird.",
-                "Duck is the animal, not the action.", "English", "General",
-            )
+        normalized = translator.normalize_clarification(
+            "I saw her duck.", "I saw her duck, the bird.",
+            "Duck is the animal, not the action.", "English", "General",
+        )
         self.assertEqual(normalized, "I saw the duck that belongs to her.")
+
+    def test_duck_action_clarification_is_canonical_without_ollama(self):
+        normalized = translator.normalize_clarification(
+            "I saw her duck.", "I saw her lower her head.",
+            "Duck is the action of lowering her head, not a bird.",
+            "English", "General",
+        )
+        self.assertEqual(normalized, "I saw her bow her head.")
 
     @patch.object(verifier, "semantic_check", return_value={
         "meaning_preserved": True, "selected_meaning_preserved": True,
