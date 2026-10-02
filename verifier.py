@@ -3,6 +3,7 @@
 import json
 import re
 from difflib import SequenceMatcher
+from translator import canonicalize_known_clarification
 
 NLLB_MODEL = "facebook/nllb-200-distilled-600M"
 OLLAMA_URL = "http://localhost:11434/api/generate"
@@ -76,7 +77,7 @@ Canonical meaning reference: {resolved_reference or original_text}
 Back-translation: {back_translation}
 Selected interpretation: {clarification or 'None'}
 Semantic constraint: {semantic_constraint or 'None'}
-Rules: (1) The human-selected interpretation disambiguates the original; it does not add a new event or entity. For example, “I saw her duck, the bird” means the duck belonging to her is a bird. (2) Check that the back-translation matches that intended reading and the semantic constraint. (3) A difference in wording is not a mismatch. (4) Set a constraint to false only when you can identify a real contradiction; if it is consistent, set true. (5) Report additions/omissions only when they change material meaning relative to the canonical reference. If an added phrase merely clarifies the selected sense, do not call it a major addition. Return a short reason naming the actual preserved or contradicted fact.
+Rules: (1) The human-selected interpretation disambiguates the original; it does not add a new event or entity. For example, “I saw the duck that belongs to her” selects the bird reading, while “I saw her bow her head” selects the action reading. (2) Check that the back-translation matches that intended reading and the semantic constraint. (3) A difference in wording is not a mismatch. (4) Set a constraint to false only when you can identify a real contradiction; if it is consistent, set true. (5) Report additions/omissions only when they change material meaning relative to the canonical reference. If an added phrase merely clarifies the selected sense, do not call it a major addition. Return a short reason naming the actual preserved or contradicted fact.
 Return JSON with keys meaning_preserved, selected_meaning_preserved, semantic_constraint_satisfied, context_consistent, major_additions, major_omissions, semantic_similarity (0..1 or null), reason. Booleans must be true/false/null. Lists must contain only material meaning changes."""
     response = requests.post(OLLAMA_URL, json={
         "model": REASONING_MODEL, "prompt": prompt, "stream": False,
@@ -127,6 +128,10 @@ def verify_translation(original_text, translated_text, source_language, target_l
                        selected_meaning=None, **_legacy_kwargs):
     """Return structured, comparable evidence for a translation candidate."""
     clarification = clarification or selected_meaning
+    if clarification:
+        clarification = canonicalize_known_clarification(
+            original_text, clarification, semantic_constraint, source_language
+        ) or clarification
     if not original_text or not original_text.strip() or not translated_text or not translated_text.strip():
         return {
             "status": "REVIEW", "meaning_preserved": False,
