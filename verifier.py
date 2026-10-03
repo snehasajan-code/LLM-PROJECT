@@ -88,11 +88,16 @@ Return JSON with keys meaning_preserved, selected_meaning_preserved, semantic_co
     raw = response.json().get("response", "")
     data = json.loads(raw)
     for key in ("meaning_preserved", "selected_meaning_preserved", "semantic_constraint_satisfied", "context_consistent"):
-        if data.get(key) not in (True, False):
+        # JSON booleans decode to bool; integers 0/1 compare equal to them in
+        # Python, so require the exact boolean type to avoid accepting malformed
+        # model evidence.
+        if not isinstance(data.get(key), bool):
             data[key] = None
     for key in ("major_additions", "major_omissions"):
         if not isinstance(data.get(key), list):
-            data[key] = []
+            # None represents unavailable evidence. Do not turn malformed model
+            # output into a legitimate empty list (meaning “none reported”).
+            data[key] = None
     similarity = data.get("semantic_similarity")
     if not isinstance(similarity, (int, float)) or not 0 <= similarity <= 1:
         data["semantic_similarity"] = None
@@ -113,7 +118,7 @@ def semantic_check(original_text, back_translation, source_language,
             "selected_meaning_preserved": None if clarification else True,
             "semantic_constraint_satisfied": None if semantic_constraint else True,
             "context_consistent": None,
-            "major_additions": [], "major_omissions": [], "semantic_similarity": None,
+            "major_additions": None, "major_omissions": None, "semantic_similarity": None,
             "reason": f"Semantic LLM check unavailable: {exc}",
         }
 
@@ -140,6 +145,20 @@ def _is_known_duck_action_paraphrase(original, reference, back, source_language)
         "i saw her lower her head",
         "i saw her lowering her head",
     }
+
+
+def _has_valid_semantic_evidence(semantic):
+    """Whether every required Qwen field has its expected JSON-derived type."""
+    boolean_fields = (
+        "meaning_preserved", "selected_meaning_preserved",
+        "semantic_constraint_satisfied", "context_consistent",
+    )
+    list_fields = ("major_additions", "major_omissions")
+    return (
+        isinstance(semantic, dict)
+        and all(isinstance(semantic.get(key), bool) for key in boolean_fields)
+        and all(isinstance(semantic.get(key), list) for key in list_fields)
+    )
 
 
 def verify_translation(original_text, translated_text, source_language, target_language,
@@ -222,7 +241,9 @@ def verify_translation(original_text, translated_text, source_language, target_l
     # English action. Treat that tightly-scoped inflectional paraphrase as
     # equivalent, but only when all hard preservation checks also pass and
     # the semantic model found no material additions or omissions.
-    if (action_paraphrase and nums_ok and dates_ok and entities_ok
+    semantic_evidence_valid = _has_valid_semantic_evidence(semantic)
+    if (action_paraphrase and semantic_evidence_valid
+            and nums_ok and dates_ok and entities_ok
             and not semantic.get("major_additions")
             and not semantic.get("major_omissions")):
         semantic = dict(semantic)
@@ -241,23 +262,29 @@ def verify_translation(original_text, translated_text, source_language, target_l
     constraint = semantic.get("semantic_constraint_satisfied") if semantic_constraint else True
     context_ok = semantic.get("context_consistent")
     hard_fail = not (nums_ok and dates_ok and entities_ok)
-    additions_found = bool(semantic.get("major_additions"))
-    omissions_found = bool(semantic.get("major_omissions"))
+    additions_valid = isinstance(semantic.get("major_additions"), list)
+    omissions_valid = isinstance(semantic.get("major_omissions"), list)
+    additions_found = additions_valid and bool(semantic["major_additions"])
+    omissions_found = omissions_valid and bool(semantic["major_omissions"])
     contradictions = (
         any(value is False for value in (meaning, selected, constraint, context_ok))
         or additions_found or omissions_found
     )
-    unresolved = any(value is None for value in (meaning, selected, constraint, context_ok))
+    unresolved = (
+        any(value is None for value in (meaning, selected, constraint, context_ok))
+        or not additions_valid or not omissions_valid
+    )
     status = "PASS" if not hard_fail and not contradictions and not unresolved else "REVIEW"
 
     original_tokens = normalize_text(semantic_reference).split()
     back_tokens = normalize_text(back).split()
     similarity = SequenceMatcher(None, original_tokens, back_tokens).ratio() if original_tokens or back_tokens else None
-    additions = list(semantic.get("major_additions") or [])
-    omissions = list(semantic.get("major_omissions") or [])
-    if missing_nums: omissions.extend(f"number: {x}" for x in missing_nums)
-    if missing_dates: omissions.extend(f"date: {x}" for x in missing_dates)
-    if missing_entities: omissions.extend(f"entity: {x}" for x in missing_entities)
+    additions = list(semantic["major_additions"]) if additions_valid else None
+    omissions = list(semantic["major_omissions"]) if omissions_valid else None
+    if omissions is not None:
+        if missing_nums: omissions.extend(f"number: {x}" for x in missing_nums)
+        if missing_dates: omissions.extend(f"date: {x}" for x in missing_dates)
+        if missing_entities: omissions.extend(f"entity: {x}" for x in missing_entities)
 
     result = {
         "status": status, "meaning_preserved": meaning,

@@ -1,9 +1,10 @@
-import unittest
+import json
 import sys
+import unittest
 from contextlib import nullcontext
 from pathlib import Path
-from unittest.mock import patch
 from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -111,6 +112,126 @@ class VerificationTests(unittest.TestCase):
             semantic_constraint="Duck refers to bowing her head, not a bird.",
         )
         self.assertEqual(result["status"], "REVIEW")
+
+
+class SemanticResponseValidationTests(unittest.TestCase):
+    @staticmethod
+    def response_for(payload):
+        return SimpleNamespace(
+            json=lambda: {"response": json.dumps(payload)},
+            raise_for_status=lambda: None,
+        )
+
+    @staticmethod
+    def valid_payload():
+        return {
+            "meaning_preserved": True,
+            "selected_meaning_preserved": True,
+            "semantic_constraint_satisfied": True,
+            "context_consistent": True,
+            "major_additions": [], "major_omissions": [],
+            "semantic_similarity": 0.9, "reason": "Preserved.",
+        }
+
+    def parse(self, payload):
+        requests_stub = SimpleNamespace(post=Mock(return_value=self.response_for(payload)))
+        with patch.dict(sys.modules, {"requests": requests_stub}):
+            return verifier._ollama_semantic_check("source", "back", "English")
+
+    def test_only_json_booleans_are_accepted(self):
+        for value in (True, False):
+            with self.subTest(value=value):
+                payload = self.valid_payload()
+                payload["meaning_preserved"] = value
+                self.assertIs(self.parse(payload)["meaning_preserved"], value)
+
+        for value in (0, 1, "true", "false", "yes", "no", None):
+            with self.subTest(value=value):
+                payload = self.valid_payload()
+                payload["meaning_preserved"] = value
+                self.assertIsNone(self.parse(payload)["meaning_preserved"])
+
+        payload = self.valid_payload()
+        del payload["meaning_preserved"]
+        self.assertIsNone(self.parse(payload)["meaning_preserved"])
+
+    def test_additions_and_omissions_preserve_valid_lists_and_reject_other_types(self):
+        payload = self.valid_payload()
+        self.assertEqual(self.parse(payload)["major_additions"], [])
+        payload["major_additions"] = ["an extra event"]
+        self.assertEqual(self.parse(payload)["major_additions"], ["an extra event"])
+        payload["major_omissions"] = ["a missing event"]
+        self.assertEqual(self.parse(payload)["major_omissions"], ["a missing event"])
+
+        for field in ("major_additions", "major_omissions"):
+            for value in ("none", {"item": "extra"}, None, 1, True):
+                with self.subTest(field=field, value=value):
+                    payload = self.valid_payload()
+                    payload[field] = value
+                    self.assertIsNone(self.parse(payload)[field])
+
+    @patch.object(verifier, "nllb_translate", return_value="Hello.")
+    def test_malformed_additions_evidence_forces_review_in_verifier(self, _back):
+        payload = self.valid_payload()
+        payload["major_additions"] = "none"
+        requests_stub = SimpleNamespace(post=Mock(return_value=self.response_for(payload)))
+        with patch.dict(sys.modules, {"requests": requests_stub}):
+            result = verifier.verify_translation("Hello.", "ഹലോ.", "English", "Malayalam")
+        self.assertEqual(result["status"], "REVIEW")
+        self.assertIsNone(result["major_additions"])
+
+    @patch.object(verifier, "nllb_translate", return_value="Hello.")
+    def test_missing_required_boolean_forces_review_in_verifier(self, _back):
+        payload = self.valid_payload()
+        del payload["meaning_preserved"]
+        requests_stub = SimpleNamespace(post=Mock(return_value=self.response_for(payload)))
+        with patch.dict(sys.modules, {"requests": requests_stub}):
+            result = verifier.verify_translation("Hello.", "ഹലോ.", "English", "Malayalam")
+        self.assertEqual(result["status"], "REVIEW")
+        self.assertIsNone(result["meaning_preserved"])
+
+    @patch.object(verifier, "nllb_translate", return_value="Good morning.")
+    def test_transport_failure_stays_unknown_and_does_not_pass(self, _back):
+        requests_stub = SimpleNamespace(post=Mock(side_effect=RuntimeError("Ollama unavailable")))
+        with patch.dict(sys.modules, {"requests": requests_stub}):
+            evidence = verifier.semantic_check("Good morning.", "Good morning.", "English")
+            result = verifier.verify_translation(
+                "Good morning.", "സുപ്രഭാതം.", "English", "Malayalam"
+            )
+        self.assertIsNone(evidence["meaning_preserved"])
+        self.assertIsNone(evidence["major_additions"])
+        self.assertEqual(result["status"], "REVIEW")
+        self.assertIsNone(result["meaning_preserved"])
+
+    @patch.object(verifier, "nllb_translate", return_value="I saw her bowing her head.")
+    def test_duck_action_unknown_flags_are_not_overridden(self, _back):
+        payload = self.valid_payload()
+        payload["meaning_preserved"] = 1
+        requests_stub = SimpleNamespace(post=Mock(return_value=self.response_for(payload)))
+        with patch.dict(sys.modules, {"requests": requests_stub}):
+            result = verifier.verify_translation(
+                "I saw her duck.", "action translation", "English", "Malayalam",
+                clarification="I saw her bow her head.",
+                semantic_constraint="Duck refers to lowering her head, not a bird.",
+            )
+        self.assertEqual(result["status"], "REVIEW")
+        self.assertIsNone(result["meaning_preserved"])
+
+    @patch.object(verifier, "nllb_translate", return_value="I saw her bowing her head.")
+    def test_duck_action_malformed_json_is_not_overridden(self, _back):
+        response = SimpleNamespace(
+            json=lambda: {"response": "not valid JSON"},
+            raise_for_status=lambda: None,
+        )
+        requests_stub = SimpleNamespace(post=Mock(return_value=response))
+        with patch.dict(sys.modules, {"requests": requests_stub}):
+            result = verifier.verify_translation(
+                "I saw her duck.", "action translation", "English", "Malayalam",
+                clarification="I saw her bow her head.",
+                semantic_constraint="Duck refers to lowering her head, not a bird.",
+            )
+        self.assertEqual(result["status"], "REVIEW")
+        self.assertIsNone(result["meaning_preserved"])
 
 
 class SourceNormalizationTests(unittest.TestCase):
