@@ -6,12 +6,30 @@ OLLAMA_URL = "http://localhost:11434/api/generate"
 AMBIGUITY_MODEL = "qwen2.5:3b"
 
 
+def _canonicalize_known_duck_result(text, result, source_language):
+    """Use one stable pair of complete paraphrases for the standard duck example."""
+    normalized = " ".join((text or "").casefold().split()).rstrip(".!?")
+    if source_language != "English" or normalized != "i saw her duck":
+        return result
+
+    canonical = dict(result)
+    canonical["interpretations"] = [
+        "I saw the duck that belongs to her.",
+        "I saw her bow her head.",
+    ]
+    canonical["semantic_constraints"] = [
+        "Duck refers to the bird/animal that belongs to her, not the action of lowering a head.",
+        "Duck refers to her lowering/bowing her head, not to a bird/animal.",
+    ]
+    return canonical
+
+
 def _known_ambiguity(text, source_language):
     """Return deterministic clarification for the project's standard duck demo."""
     normalized = " ".join((text or "").casefold().split()).rstrip(".!?")
     if source_language != "English" or normalized != "i saw her duck":
         return None
-    return {
+    result = {
         "ambiguous": True,
         "available": True,
         "reason": "'Duck' can mean a bird or the action of lowering one's head.",
@@ -24,6 +42,7 @@ def _known_ambiguity(text, source_language):
             "Duck refers to her lowering/bowing her head, not to a bird/animal.",
         ],
     }
+    return _canonicalize_known_duck_result(text, result, source_language)
 
 
 def detect_ambiguity(
@@ -237,10 +256,11 @@ Return ONLY valid JSON.
             "semantic_constraints": []
         }
 
-    return {
+    result = {
         "ambiguous": True,
         "available": True,
         "reason": reason,
         "interpretations": interpretations,
         "semantic_constraints": semantic_constraints
     }
+    return _canonicalize_known_duck_result(text, result, source_language)

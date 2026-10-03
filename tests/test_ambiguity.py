@@ -50,6 +50,25 @@ class AmbiguityFallbackTests(unittest.TestCase):
             "I saw her bow her head.",
         ])
 
+    def test_model_duck_choices_are_canonicalized_to_complete_paraphrases(self):
+        model_result = {
+            "ambiguous": True,
+            "interpretations": ["I saw her duck, the bird.", "I saw her lower her head."],
+            "semantic_constraints": ["Duck means the bird.", "Duck means lowering her head."],
+        }
+        result = ambiguity._canonicalize_known_duck_result(
+            "I saw her duck.", model_result, "English"
+        )
+
+        self.assertEqual(result["interpretations"], [
+            "I saw the duck that belongs to her.",
+            "I saw her bow her head.",
+        ])
+        self.assertEqual(result["semantic_constraints"], [
+            "Duck refers to the bird/animal that belongs to her, not the action of lowering a head.",
+            "Duck refers to her lowering/bowing her head, not to a bird/animal.",
+        ])
+
 
 if __name__ == "__main__":
     unittest.main()
