@@ -67,11 +67,12 @@ def _entities(text):
 
 def _ollama_semantic_check(original_text, back_translation, source_language,
                            clarification=None, semantic_constraint=None, context="",
-                           resolved_reference=None):
+                           resolved_reference=None, tone="Neutral"):
     import requests
     prompt = f"""Verify whether the back-translation preserves the intended meaning. Compare it primarily with the canonical meaning reference below, not with the unresolved wording alone. Treat valid paraphrases as equivalent.
 Source language: {source_language}
 Context/domain: {context or 'General'}
+Requested tone/style: {tone or 'Neutral'}
 Original ambiguous source: {original_text}
 Canonical meaning reference: {resolved_reference or original_text}
 Back-translation: {back_translation}
@@ -100,12 +101,12 @@ Return JSON with keys meaning_preserved, selected_meaning_preserved, semantic_co
 
 def semantic_check(original_text, back_translation, source_language,
                    clarification=None, semantic_constraint=None, context="",
-                   resolved_reference=None):
+                   resolved_reference=None, tone="Neutral"):
     """Backward-compatible semantic check; unknown evidence stays unknown."""
     try:
         return _ollama_semantic_check(original_text, back_translation, source_language,
                                       clarification, semantic_constraint, context,
-                                      resolved_reference)
+                                      resolved_reference, tone)
     except Exception as exc:
         return {
             "meaning_preserved": None,
@@ -143,15 +144,34 @@ def _is_known_duck_action_paraphrase(original, reference, back, source_language)
 
 def verify_translation(original_text, translated_text, source_language, target_language,
                        clarification=None, semantic_constraint=None, context="",
-                       selected_meaning=None, **_legacy_kwargs):
+                       selected_meaning=None, tone=None, request=None,
+                       language_confidence=None, **_legacy_kwargs):
     """Return structured, comparable evidence for a translation candidate."""
+    if request is not None:
+        original_text = request.source_text or original_text
+        source_language = request.source_language or source_language
+        target_language = request.target_language or target_language
+        context = request.context or context
+        tone = tone or request.tone
+        language_confidence = (
+            request.voice_confidence
+            if language_confidence is None else language_confidence
+        )
+        clarification = clarification or request.selected_meaning
+        semantic_constraint = semantic_constraint or request.semantic_constraint
+        if not selected_meaning:
+            selected_meaning = request.selected_meaning
+        idiom = request.ensure_idiom()
+    else:
+        idiom = None
+    tone = tone or "Neutral"
     clarification = clarification or selected_meaning
     if clarification:
         clarification = canonicalize_known_clarification(
             original_text, clarification, semantic_constraint, source_language
         ) or clarification
     if not original_text or not original_text.strip() or not translated_text or not translated_text.strip():
-        return {
+        result = {
             "status": "REVIEW", "meaning_preserved": False,
             "selected_meaning_preserved": False if clarification else None,
             "semantic_constraint_satisfied": False if semantic_constraint else None,
@@ -161,10 +181,13 @@ def verify_translation(original_text, translated_text, source_language, target_l
             "evidence_score": -100, "risk_index": None,
             "reason": "Original text or translation is empty.", "back_translation": "",
         }
+        if request is not None:
+            request.verification_result = result
+        return result
     try:
         back = nllb_translate(translated_text, target_language, source_language)
     except Exception as exc:
-        return {
+        result = {
             "status": "REVIEW", "meaning_preserved": None,
             "selected_meaning_preserved": None, "semantic_constraint_satisfied": None,
             "numbers_preserved": False, "dates_preserved": False,
@@ -173,15 +196,23 @@ def verify_translation(original_text, translated_text, source_language, target_l
             "evidence_score": -100, "risk_index": None,
             "reason": f"Back-translation failed: {exc}", "back_translation": "",
         }
+        if request is not None:
+            request.verification_result = result
+        return result
 
-    idiom = interpret_idiom(original_text, source_language) if not clarification else None
-    semantic_reference = clarification or (idiom["meaning"] if idiom else original_text)
+    if request is None and not clarification:
+        idiom = interpret_idiom(original_text, source_language)
+    semantic_reference = clarification or (
+        (idiom.get("normalized_text") or idiom.get("meaning"))
+        if idiom else original_text
+    )
     nums_ok, missing_nums = _check_terms(semantic_reference, back, extract_numbers)
     dates_ok, missing_dates = _check_terms(semantic_reference, back, _dates)
     entities_ok, missing_entities = _check_terms(semantic_reference, back, _entities)
     semantic = semantic_check(
         original_text, back, source_language, clarification,
         semantic_constraint, context, resolved_reference=semantic_reference,
+        tone=tone,
     )
 
     action_paraphrase = _is_known_duck_action_paraphrase(
@@ -244,7 +275,14 @@ def verify_translation(original_text, translated_text, source_language, target_l
                           + (" and recognized action paraphrase" if action_paraphrase else ""),
     }
     from risk_engine import assess_risk, evidence_score
-    risk = assess_risk(result, ambiguity_detected=bool(clarification))
+    risk = assess_risk(
+        result, ambiguity_detected=bool(clarification),
+        language_confidence=language_confidence, request=request,
+    )
     result["risk_index"] = risk
     result["evidence_score"] = evidence_score(result)
+    if request is not None:
+        request.translation = translated_text
+        request.verification_result = result
+        request.risk_result = risk
     return result

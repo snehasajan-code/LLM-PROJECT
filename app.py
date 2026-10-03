@@ -7,6 +7,8 @@ from translator import translate_text, interpret_idiom
 from ambiguity import detect_ambiguity
 from verifier import verify_translation
 from candidate_engine import translate_and_rank
+from translation_request import TranslationRequest
+from translation_pipeline import run_translation_request, evaluate_voice_repair
 
 
 # ============================================================
@@ -1182,6 +1184,10 @@ DEFAULT_STATE = {
 
     "voice_tts_path": None,
 
+    "text_translation_request": None,
+
+    "voice_translation_request": None,
+
     "current_source_text": None,
 
     "current_source_language": None,
@@ -1218,6 +1224,8 @@ def reset_translation_results():
     st.session_state.selected_interpretation = None
 
     st.session_state.selected_constraint = None
+
+    st.session_state.text_translation_request = None
 
 
 # ============================================================
@@ -1259,7 +1267,9 @@ def run_verification(
     selected_meaning=None,
     semantic_constraint=None,
     context="",
-    language_confidence=None
+    language_confidence=None,
+    tone=None,
+    request=None,
 ):
 
     arguments = {
@@ -1282,7 +1292,9 @@ def run_verification(
 
         "context": context,
 
-        "language_confidence": language_confidence
+        "language_confidence": language_confidence,
+        "tone": tone,
+        "request": request,
     }
 
     return call_supported_function(
@@ -1304,7 +1316,8 @@ def run_quality_evaluation(
     tone,
     ambiguity_result=None,
     verification=None,
-    selected_meaning=None
+    selected_meaning=None,
+    semantic_constraint=None
 ):
 
     if not EVALUATOR_AVAILABLE:
@@ -1354,6 +1367,8 @@ def run_quality_evaluation(
         "verification": verification,
 
         "selected_meaning": selected_meaning,
+
+        "semantic_constraint": semantic_constraint,
 
         "human_clarification": selected_meaning,
 
@@ -1442,7 +1457,8 @@ def run_adaptive_repair(
     context,
     tone,
     selected_meaning=None,
-    semantic_constraint=None
+    semantic_constraint=None,
+    request=None
 ):
 
     if not REPAIR_AVAILABLE:
@@ -1478,7 +1494,8 @@ def run_adaptive_repair(
 
             selected_meaning=selected_meaning,
 
-            semantic_constraint=semantic_constraint
+            semantic_constraint=semantic_constraint,
+            request=request,
         )
 
 
@@ -1779,38 +1796,67 @@ def process_text_translation(
     selected_meaning=None,
     semantic_constraint=None,
     ambiguity_result=None,
-    language_confidence=None
+    language_confidence=None,
+    request=None,
+    input_channel="text",
+    transcript=None,
+    detected_language=None,
 ):
 
-    with st.spinner("🤖 Translating and verifying the best NLLB result..."):
-        ranked = translate_and_rank(
-            source_text, source_language, target_language,
-            verify_translation,
-            clarification=selected_meaning,
-            semantic_constraint=semantic_constraint,
+    if request is None:
+        request = TranslationRequest(
+            source_text=source_text,
+            source_language=source_language,
+            target_language=target_language,
             context=context,
             tone=tone,
-            # One beam candidate avoids three forward translations plus three
-            # back-translations and LLM checks on every normal request.
+            voice_confidence=language_confidence,
+            transcript=transcript if input_channel == "voice" else None,
+            detected_language=detected_language if input_channel == "voice" else None,
+        )
+    else:
+        request.source_text = source_text
+        request.source_language = source_language
+        request.target_language = target_language
+        request.context = context
+        request.tone = tone
+        request.voice_confidence = language_confidence
+    request.record_ambiguity(ambiguity_result)
+    request.select_meaning(selected_meaning, semantic_constraint)
+    if input_channel == "voice":
+        request.transcript = transcript or source_text
+        request.detected_language = detected_language or source_language
+    request.ensure_idiom()
+    st.session_state[f"{input_channel}_translation_request"] = request
+
+    with st.spinner("🤖 Translating and verifying the best NLLB result..."):
+        request = run_translation_request(
+            request,
+            verifier=verify_translation,
+            # Keep the existing one-candidate normal path.
             candidate_count=1,
         )
-        translation = ranked["translation"]
-        verification = (ranked.get("selected") or {}).get("verification")
+        translation = request.translation or ""
+        verification = request.verification_result
         if not verification:
             verification = run_verification(
                 source_text, translation, source_language, target_language,
                 selected_meaning, semantic_constraint, context, language_confidence,
+                tone=tone, request=request,
             )
+            request.verification_result = verification
         if language_confidence is not None:
             from risk_engine import assess_risk
             verification["risk_index"] = assess_risk(
-                verification, bool(selected_meaning), language_confidence
+                verification, bool(selected_meaning), language_confidence,
+                request=request,
             )
+            request.risk_result = verification["risk_index"]
         verification["candidate_evidence"] = [
             {"translation": item["translation"],
              "evidence_score": item["evidence_score"],
              "risk_index": item["risk"]["score"]}
-            for item in ranked.get("candidates", [])
+            for item in request.candidates
         ]
 
 
@@ -1832,7 +1878,8 @@ def process_text_translation(
 
         verification=verification,
 
-        selected_meaning=selected_meaning
+        selected_meaning=request.selected_meaning,
+        semantic_constraint=request.semantic_constraint,
     )
 
 
@@ -2541,7 +2588,9 @@ with text_tab:
                                     semantic_constraint=(
                                         st.session_state
                                         .selected_constraint
-                                    )
+                                    ),
+
+                                    request=st.session_state.text_translation_request,
                                 )
                             )
 
@@ -3082,7 +3131,11 @@ with voice_tab:
                                             context=voice_context,
 
                                             tone=voice_tone,
-                                            language_confidence=voice_result.get("confidence")
+                                            language_confidence=voice_result.get("confidence"),
+                                            ambiguity_result=voice_ambiguity,
+                                            input_channel="voice",
+                                            transcript=transcript,
+                                            detected_language=detected_language,
                                         )
                                     )
 
@@ -3097,6 +3150,10 @@ with voice_tab:
 
                                     st.session_state.voice_evaluation = (
                                         voice_evaluation
+                                    )
+
+                                    voice_result["translation_request"] = (
+                                        st.session_state.voice_translation_request
                                     )
 
                             except Exception as e:
@@ -3213,7 +3270,10 @@ with voice_tab:
                                         ambiguity_result=(
                                             voice_ambiguity
                                         ),
-                                        language_confidence=voice_result.get("confidence")
+                                        language_confidence=voice_result.get("confidence"),
+                                        input_channel="voice",
+                                        transcript=transcript,
+                                        detected_language=detected_language,
                                     )
                                 )
 
@@ -3228,6 +3288,10 @@ with voice_tab:
 
                                 st.session_state.voice_evaluation = (
                                     voice_evaluation
+                                )
+
+                                voice_result["translation_request"] = (
+                                    st.session_state.voice_translation_request
                                 )
 
 
@@ -3361,7 +3425,13 @@ with voice_tab:
 
                                                 tone=(
                                                     voice_tone
-                                                )
+                                                ),
+
+                                                selected_meaning=voice_result.get("selected_meaning"),
+
+                                                semantic_constraint=voice_result.get("selected_constraint"),
+
+                                                request=st.session_state.voice_translation_request,
                                             )
                                         )
 
@@ -3417,11 +3487,12 @@ with voice_tab:
                                     if repaired_verification:
                                         st.session_state.voice_translation_result = repaired
                                         st.session_state.voice_verification = repaired_verification
-                                        st.session_state.voice_evaluation = run_quality_evaluation(
-                                            transcript, repaired, detected_language,
-                                            voice_target, voice_context, voice_tone,
-                                            verification=repaired_verification,
-                                            selected_meaning=voice_result.get("selected_meaning"),
+                                        st.session_state.voice_evaluation = evaluate_voice_repair(
+                                            st.session_state.voice_translation_request,
+                                            run_quality_evaluation,
+                                            transcript,
+                                            repaired,
+                                            repaired_verification,
                                         )
                                     else:
                                         st.warning("Repair evidence was incomplete; original translation retained.")

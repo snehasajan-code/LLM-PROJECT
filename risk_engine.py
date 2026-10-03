@@ -1,8 +1,13 @@
 """Explainable rule-based Translation Risk Index; not a correctness probability."""
 
 
-def assess_risk(evidence, ambiguity_detected=False, language_confidence=None):
+def assess_risk(evidence, ambiguity_detected=False, language_confidence=None,
+                request=None):
     """Return a bounded 0-100 index and rule-based decision with reasons."""
+    if request is not None:
+        ambiguity_detected = request.ambiguity_status == "true"
+        if language_confidence is None:
+            language_confidence = request.voice_confidence
     score = 0
     reasons = []
 
@@ -13,6 +18,12 @@ def assess_risk(evidence, ambiguity_detected=False, language_confidence=None):
             reasons.append(message)
 
     add(10, ambiguity_detected, "Ambiguity was detected.")
+    if request is not None:
+        add(
+            10,
+            request.ambiguity_status == "unknown",
+            "Ambiguity detection was unavailable; uncertainty is retained.",
+        )
     if language_confidence is not None and language_confidence < 0.65:
         add(10, True, "Speech language confidence is low.")
     add(25, evidence.get("meaning_preserved") is False, "Meaning preservation failed or was contradicted.")
@@ -37,11 +48,15 @@ def assess_risk(evidence, ambiguity_detected=False, language_confidence=None):
         level, action = "High", "REPAIR"
     else:
         level, action = "Critical", "HUMAN_REVIEW"
-    return {
+    result = {
         "score": score, "level": level, "action": action,
         "reasons": reasons or ["No configured risk indicators were triggered."],
         "interpretation": "Design-based Translation Risk Index; not a calibrated probability.",
     }
+    if request is not None:
+        result["ambiguity_status"] = request.ambiguity_status
+        request.risk_result = result
+    return result
 
 
 def evidence_score(evidence):
