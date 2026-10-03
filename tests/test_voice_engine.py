@@ -45,5 +45,19 @@ class VoiceTranscriptionCompatibilityTests(unittest.TestCase):
         self.assertNotIsInstance(captured["audio"], (str, bytes))
 
 
+class LanguageMixTests(unittest.TestCase):
+    def test_english_and_malayalam_scripts_are_reported_as_mixed(self):
+        result = voice_engine.detect_language_mix("Hello, നമസ്കാരം.")
+
+        self.assertTrue(result["mixed"])
+        self.assertEqual(result["languages"], ["English", "Malayalam"])
+
+    def test_latin_only_transcript_does_not_claim_mixed_language(self):
+        result = voice_engine.detect_language_mix("Hallo, namens Gare.")
+
+        self.assertFalse(result["mixed"])
+        self.assertEqual(result["languages"], ["English"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -3,7 +3,7 @@ import html
 import textwrap
 import streamlit as st
 
-from translator import translate_text
+from translator import translate_text, interpret_idiom
 from ambiguity import detect_ambiguity
 from verifier import verify_translation
 from candidate_engine import translate_and_rank
@@ -2044,6 +2044,12 @@ with text_tab:
         f"{len(text)} / 5000 characters"
     )
 
+    idiom_info = interpret_idiom(text, source_language)
+    if idiom_info:
+        st.info(
+            f"Idiom detected: **{idiom_info['phrase']}**. "
+            f"Interpreted as: *{idiom_info['meaning']}*"
+        )
 
     if st.button(
         "🚀 Analyze & Translate",
@@ -2107,10 +2113,14 @@ with text_tab:
 
 
                 except Exception as e:
-
-                    st.error(
-                        f"Ambiguity detection failed: {e}"
-                    )
+                    st.session_state.ambiguity_result = {
+                        "ambiguous": False,
+                        "available": False,
+                        "reason": "",
+                        "interpretations": [],
+                        "semantic_constraints": [],
+                        "error": str(e),
+                    }
 
 
     st.markdown(
@@ -2129,6 +2139,12 @@ with text_tab:
 
 
     if ambiguity_result:
+
+        if ambiguity_result.get("available") is False:
+            st.warning(
+                "Ambiguity detection is unavailable because Ollama did not respond. "
+                "Continuing without a selected meaning; please review the translation."
+            )
 
         if ambiguity_result.get(
             "ambiguous",
@@ -2442,6 +2458,12 @@ with text_tab:
             display_verification(
                 verification
             )
+
+            if verification.get("status") == "PASS":
+                st.info(
+                    "Adaptive repair was not run because verification passed. "
+                    "Repair is offered when verification flags a possible issue."
+                )
 
 
         # ====================================================
@@ -2851,12 +2873,12 @@ with voice_tab:
 
             with col1:
 
+                estimated_language = voice_result.get("language", "Unknown")
                 st.metric(
-                    "Detected Language",
-                    voice_result.get(
-                        "language",
-                        "Unknown"
-                    )
+                    "Audio Language Estimate",
+                    estimated_language
+                    if voice_result.get("confidence", 0) >= 0.45
+                    else "Uncertain"
                 )
 
 
@@ -2884,9 +2906,9 @@ with voice_tab:
 
                 st.metric(
                     "Language Pattern",
-                    "Mixed"
-                    if mix.get("mixed")
-                    else "Single"
+                    "Uncertain"
+                    if voice_result.get("confidence", 0) < 0.45
+                    else ("Mixed" if mix.get("mixed") else "Single")
                 )
 
 
@@ -2899,14 +2921,19 @@ with voice_tab:
             )
 
 
+            low_language_confidence = voice_result.get("confidence", 0) < 0.45
+            if low_language_confidence:
+                st.warning(
+                    "Speech recognition is uncertain for this recording. "
+                    "Check and edit the transcript before translating."
+                )
+
             transcript = st.text_area(
-                "Detected speech",
-                value=voice_result.get(
-                    "text",
-                    ""
-                ),
+                "Review or edit transcript",
+                value=voice_result.get("text", ""),
                 height=130,
-                key="voice_transcript"
+                key="voice_transcript",
+                help="Correct any misheard words here before running translation."
             )
 
 
@@ -2917,11 +2944,21 @@ with voice_tab:
                 )
 
 
-                detected_language = voice_result.get(
-                    "language",
-                    "English"
+                detected_language = voice_result.get("language", "English")
+                source_default = (
+                    detected_language if detected_language in LANGUAGES else "English"
                 )
-
+                voice_source = st.selectbox(
+                    "Source Language for Translation",
+                    LANGUAGES,
+                    index=LANGUAGES.index(source_default),
+                    key="voice_source_language",
+                    help=(
+                        "Whisper detects one dominant language. For mixed speech, "
+                        "choose the language that best matches the transcript."
+                    )
+                )
+                detected_language = voice_source
 
                 voice_target = st.selectbox(
                     "Target Language",
@@ -3004,15 +3041,19 @@ with voice_tab:
                                     )
                                 )
 
+                                voice_result["ambiguity_result"] = voice_ambiguity
+
+                                if voice_ambiguity.get("available") is False:
+                                    st.warning(
+                                        "Ollama is unavailable, so ambiguity detection was skipped. "
+                                        "Continuing with translation; please review the result."
+                                    )
+
 
                                 if voice_ambiguity.get(
                                     "ambiguous",
                                     False
                                 ):
-
-                                    voice_result[
-                                        "ambiguity_result"
-                                    ] = voice_ambiguity
 
                                     st.warning(
                                         "⚠️ Ambiguity detected. "
@@ -3253,6 +3294,12 @@ with voice_tab:
                         display_verification(
                             voice_verification
                         )
+
+                        if voice_verification.get("status") == "PASS":
+                            st.info(
+                                "Adaptive repair was not run because voice verification passed. "
+                                "Repair is offered when verification flags a possible issue."
+                            )
 
 
                     # =============================================

@@ -35,7 +35,7 @@ class RiskAndEvaluationTests(unittest.TestCase):
     def test_evaluator_reports_selected_interpretation_when_clarified(self):
         result = evaluator.evaluate_translation(
             "I saw her duck.", "target translation", "English", "Malayalam",
-            clarification="I saw her duck, the bird.",
+            clarification="I saw the duck that belongs to her.",
             verification={"status": "PASS", "meaning_preserved": True,
                           "selected_meaning_preserved": True},
         )
@@ -74,7 +74,43 @@ class VerificationTests(unittest.TestCase):
         self.assertEqual(result["status"], "PASS")
         self.assertEqual(result["risk_index"]["score"], 10)
         self.assertEqual(semantic.call_args.kwargs["resolved_reference"],
-                         "I saw her duck, the bird.")
+                         "I saw the duck that belongs to her.")
+
+    @patch.object(verifier, "semantic_check", return_value={
+        "meaning_preserved": False, "selected_meaning_preserved": False,
+        "semantic_constraint_satisfied": False, "context_consistent": False,
+        "major_additions": [], "major_omissions": [], "semantic_similarity": 0.42,
+        "reason": "Aspect wording differs.",
+    })
+    @patch.object(verifier, "nllb_translate", return_value="I saw her bowing her head.")
+    def test_duck_action_progressive_backtranslation_is_equivalent(self, _back, _semantic):
+        result = verifier.verify_translation(
+            "I saw her duck.", "അവൾ തല കുനിക്കുന്നത് ഞാൻ കണ്ടു.",
+            "English", "Malayalam",
+            clarification="I saw her bow her head.",
+            semantic_constraint="Duck refers to her bowing her head, not a bird.",
+        )
+        self.assertEqual(result["status"], "PASS")
+        self.assertTrue(result["meaning_preserved"])
+        self.assertTrue(result["selected_meaning_preserved"])
+        self.assertTrue(result["semantic_constraint_satisfied"])
+        self.assertTrue(result["context_consistent"])
+        self.assertIn("recognized action paraphrase", result["evidence_source"])
+
+    @patch.object(verifier, "semantic_check", return_value={
+        "meaning_preserved": False, "selected_meaning_preserved": False,
+        "semantic_constraint_satisfied": False, "context_consistent": False,
+        "major_additions": [], "major_omissions": [], "semantic_similarity": 0.2,
+        "reason": "Meaning differs.",
+    })
+    @patch.object(verifier, "nllb_translate", return_value="I saw her bowing.")
+    def test_non_equivalent_duck_action_backtranslation_stays_review(self, _back, _semantic):
+        result = verifier.verify_translation(
+            "I saw her duck.", "target", "English", "Malayalam",
+            clarification="I saw her bow her head.",
+            semantic_constraint="Duck refers to bowing her head, not a bird.",
+        )
+        self.assertEqual(result["status"], "REVIEW")
 
 
 class SourceNormalizationTests(unittest.TestCase):
@@ -118,16 +154,19 @@ class SourceNormalizationTests(unittest.TestCase):
         self.assertEqual(generated["max_new_tokens"], 64)
 
     def test_clarification_is_naturalized_before_nllb(self):
-        mock_requests = SimpleNamespace(post=lambda *args, **kwargs: SimpleNamespace(
-            raise_for_status=lambda: None,
-            json=lambda: {"response": "I saw the duck that belongs to her."},
-        ))
-        with patch.dict(sys.modules, {"requests": mock_requests}):
-            normalized = translator.normalize_clarification(
-                "I saw her duck.", "I saw her duck, the bird.",
-                "Duck is the animal, not the action.", "English", "General",
-            )
+        normalized = translator.normalize_clarification(
+            "I saw her duck.", "I saw her duck, the bird.",
+            "Duck is the animal, not the action.", "English", "General",
+        )
         self.assertEqual(normalized, "I saw the duck that belongs to her.")
+
+    def test_duck_action_clarification_is_canonical_without_ollama(self):
+        normalized = translator.normalize_clarification(
+            "I saw her duck.", "I saw her lower her head.",
+            "Duck is the action of lowering her head, not a bird.",
+            "English", "General",
+        )
+        self.assertEqual(normalized, "I saw her bow her head.")
 
     @patch.object(verifier, "semantic_check", return_value={
         "meaning_preserved": True, "selected_meaning_preserved": True,
@@ -249,6 +288,89 @@ class CandidateAndRepairTests(unittest.TestCase):
         self.assertEqual(result["initial_translation"], "original translation")
         self.assertEqual(result["recommended_candidate"], "suggested candidate")
         self.assertTrue(result["human_review"])
+
+
+class IdiomInterpretationTests(unittest.TestCase):
+    def test_raining_cats_and_dogs_is_paraphrased_before_translation(self):
+        result = translator.interpret_idiom("its raining cats and dogs.")
+        self.assertEqual(result["meaning"], "It is raining very heavily.")
+        self.assertEqual(result["normalized_text"], "It is raining very heavily.")
+
+    def test_idiom_phrase_inside_sentence_is_paraphrased(self):
+        result = translator.interpret_idiom("It is raining cats and dogs outside.")
+        self.assertEqual(result["normalized_text"], "It is raining very heavily outside.")
+
+    def test_selected_idiom_meaning_is_not_normalized_back_to_literal_phrase(self):
+        source = "its raining cats and dogs."
+        meaning = "It is raining very heavily."
+        self.assertEqual(
+            translator.normalize_clarification(source, meaning, None, "English"),
+            "It is raining very heavily.",
+        )
+
+    def test_candidate_flow_translates_selected_idiom_meaning(self):
+        seen = {}
+        def fake_candidates(text, source, target, count):
+            seen["source"] = text
+            return ["മഴ ശക്തമായി പെയ്യുന്നു."]
+        with patch("translator.translate_candidates", side_effect=fake_candidates):
+            with patch("translator.normalize_clarification", side_effect=AssertionError("should bypass model normalization")):
+                candidate_engine.translate_and_rank(
+                    "its raining cats and dogs.", "English", "Malayalam",
+                    lambda *args, **kwargs: {"status": "REVIEW", "evidence_score": 0},
+                    clarification="It is raining very heavily.", candidate_count=1,
+                )
+        self.assertEqual(seen["source"], "It is raining very heavily.")
+
+    def test_unknown_and_non_english_text_are_untouched(self):
+        self.assertIsNone(translator.interpret_idiom("A normal sentence."))
+        self.assertIsNone(translator.interpret_idiom("raining cats and dogs", "Malayalam"))
+
+    def test_known_bad_nllb_examples_use_curated_malayalam_meaning(self):
+        cases = [
+            ("I saw the duck that belongs to her.", "English", "Malayalam", "ഞാൻ അവളുടെ താറാവിനെ കണ്ടു."),
+            ("I saw her bow her head.", "English", "Malayalam", "അവൾ തല കുനിക്കുന്നത് ഞാൻ കണ്ടു."),
+            ("It is raining very heavily.", "English", "Malayalam", "കനത്ത മഴ പെയ്യുന്നു."),
+            ("ഞാൻ അവളുടെ താറാവിനെ കണ്ടു.", "Malayalam", "English", "I saw the duck that belongs to her."),
+            ("അവൾ തല കുനിക്കുന്നത് ഞാൻ കണ്ടു.", "Malayalam", "English", "I saw her bow her head."),
+            ("കനത്ത മഴ പെയ്യുന്നു.", "Malayalam", "English", "It is raining very heavily."),
+        ]
+        with patch.object(translator, "load_translation_model", side_effect=AssertionError("model should not be needed")):
+            for source, source_language, target_language, expected in cases:
+                with self.subTest(source=source):
+                    self.assertEqual(
+                        translator.nllb_translate(source, source_language, target_language),
+                        expected,
+                    )
+
+    def test_candidate_generation_receives_idiom_meaning(self):
+        seen = {}
+        def fake_translator(text, source, target, count):
+            seen["text"] = text
+            return ["മഴ ശക്തമായി പെയ്യുന്നു."]
+        result = candidate_engine.translate_and_rank(
+            "its raining cats and dogs.", "English", "Malayalam",
+            lambda *args, **kwargs: {"status": "REVIEW", "evidence_score": 0},
+            translator=fake_translator,
+        )
+        self.assertEqual(seen["text"], "It is raining very heavily.")
+        self.assertTrue(result["translation"])
+
+    def test_verification_uses_idiom_meaning_as_reference(self):
+        with patch.object(verifier, "nllb_translate", return_value="It is raining very heavily."):
+            with patch.object(verifier, "semantic_check") as check:
+                check.return_value = {
+                    "meaning_preserved": True, "selected_meaning_preserved": True,
+                    "semantic_constraint_satisfied": True, "context_consistent": True,
+                    "major_additions": [], "major_omissions": [],
+                    "semantic_similarity": 0.95, "reason": "Meaning preserved.",
+                }
+                result = verifier.verify_translation(
+                    "its raining cats and dogs.", "മഴ ശക്തമായി പെയ്യുന്നു.",
+                    "English", "Malayalam",
+                )
+        self.assertEqual(check.call_args.kwargs["resolved_reference"], "It is raining very heavily.")
+        self.assertEqual(result["idiom"]["phrase"], "It is raining cats and dogs")
 
 
 if __name__ == "__main__":

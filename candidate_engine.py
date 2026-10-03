@@ -28,15 +28,35 @@ def translate_and_rank(text, source_language, target_language, verifier, *,
                        clarification=None, semantic_constraint=None, context="",
                        tone="Natural", candidate_count=3, translator=None):
     """Generate NLLB hypotheses and rank them against the same source constraints."""
+    from translator import interpret_idiom
+    normalizer = None
     if translator is None:
         from translator import translate_candidates, normalize_clarification
         translator = translate_candidates
-        normalized_source = normalize_clarification(
-            text, clarification, semantic_constraint, source_language, context
-        ) if clarification and clarification.strip() else text
+        normalizer = normalize_clarification
+    idiom = interpret_idiom(text, source_language)
+    clarification_text = clarification.strip() if clarification and clarification.strip() else ""
+
+    def comparable(value):
+        return " ".join((value or "").casefold().strip(" .!?\t\r\n").split())
+
+    selected_idiom_meaning = bool(
+        idiom and clarification_text
+        and comparable(clarification_text) == comparable(idiom["meaning"])
+    )
+
+    if selected_idiom_meaning:
+        # A recognized human choice is authoritative: never ask a model to
+        # rewrite it, since that can restore the idiom's literal wording.
+        normalized_source = idiom["normalized_text"]
+    elif clarification_text:
+        # Preserve the existing injected-translator contract, but normalize
+        # human clarifications when running the production translator.
+        normalized_source = normalizer(
+            text, clarification_text, semantic_constraint, source_language, context
+        ) if normalizer else clarification_text
     else:
-        # Preserve testability and backward compatibility for injected translators.
-        normalized_source = clarification.strip() if clarification and clarification.strip() else text
+        normalized_source = idiom["normalized_text"] if idiom else text
     candidates = translator(normalized_source, source_language, target_language, candidate_count)
     return select_best_candidate(
         candidates,
