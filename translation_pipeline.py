@@ -1,10 +1,13 @@
 """Shared core orchestration for text and voice translation requests."""
 
+from time import monotonic_ns
+
 from candidate_engine import translate_and_rank
 from translation_request import TranslationRequest
 
 
-def run_translation_request(request, verifier=None, translator=None, candidate_count=1):
+def run_translation_request(request, verifier=None, translator=None, candidate_count=1,
+                            experiment_metrics=None):
     """Run candidate generation, verification, and risk assessment on one request."""
     if not isinstance(request, TranslationRequest):
         raise TypeError("request must be a TranslationRequest")
@@ -12,26 +15,32 @@ def run_translation_request(request, verifier=None, translator=None, candidate_c
         from verifier import verify_translation
         verifier = verify_translation
 
-    request.ensure_idiom()
-    ranked = translate_and_rank(
-        request.source_text,
-        request.source_language,
-        request.target_language,
-        verifier,
-        clarification=request.selected_meaning,
-        semantic_constraint=request.semantic_constraint,
-        context=request.context,
-        tone=request.tone,
-        candidate_count=candidate_count,
-        translator=translator,
-        request=request,
-    )
-    request.translation = ranked.get("translation", "")
-    request.candidates = ranked.get("candidates", [])
-    selected = ranked.get("selected") or {}
-    request.verification_result = selected.get("verification")
-    request.risk_result = selected.get("risk")
-    return request
+    started = monotonic_ns() if experiment_metrics is not None else None
+    try:
+        request.ensure_idiom()
+        ranked = translate_and_rank(
+            request.source_text,
+            request.source_language,
+            request.target_language,
+            verifier,
+            clarification=request.selected_meaning,
+            semantic_constraint=request.semantic_constraint,
+            context=request.context,
+            tone=request.tone,
+            candidate_count=candidate_count,
+            translator=translator,
+            request=request,
+            experiment_metrics=experiment_metrics,
+        )
+        request.translation = ranked.get("translation", "")
+        request.candidates = ranked.get("candidates", [])
+        selected = ranked.get("selected") or {}
+        request.verification_result = selected.get("verification")
+        request.risk_result = selected.get("risk")
+        return request
+    finally:
+        if experiment_metrics is not None:
+            experiment_metrics["total_ms"] = (monotonic_ns() - started) / 1_000_000
 
 
 def evaluate_voice_repair(request, evaluator, transcript, translation, verification):

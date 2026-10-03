@@ -1,5 +1,7 @@
 """Generate and rank NLLB candidates using independent verification evidence."""
 
+from time import monotonic_ns
+
 from risk_engine import assess_risk, evidence_score
 from translation_request import TranslationRequest, call_with_supported_kwargs
 
@@ -36,7 +38,7 @@ def select_best_candidate(candidates, verifier, *, ambiguity_detected=False,
 def translate_and_rank(text, source_language, target_language, verifier, *,
                        clarification=None, semantic_constraint=None, context="",
                        tone="Natural", candidate_count=3, translator=None,
-                       request=None):
+                       request=None, experiment_metrics=None):
     """Generate NLLB hypotheses and rank them against the same source constraints."""
     if request is None:
         request = TranslationRequest(
@@ -82,23 +84,73 @@ def translate_and_rank(text, source_language, target_language, verifier, *,
         ) if normalizer else clarification_text
     else:
         normalized_source = idiom["normalized_text"] if idiom else text
-    candidates = translator(normalized_source, source_language, target_language, candidate_count)
+    if experiment_metrics is not None:
+        experiment_metrics.update({
+            "requested_candidates": candidate_count,
+            "actual_candidates": 0,
+            "verified_candidates": 0,
+            "generation_ms": None,
+            "verification_ms": 0.0,
+            "total_ms": None,
+            "pass_count": 0,
+            "review_count": 0,
+            "selected_index": None,
+            "selected_evidence_score": None,
+            "selected_risk_index": None,
+            "repair_triggered": None,
+        })
+        generation_started = monotonic_ns()
+        candidates = list(translator(
+            normalized_source, source_language, target_language, candidate_count
+        ) or [])
+        experiment_metrics["generation_ms"] = (monotonic_ns() - generation_started) / 1_000_000
+        experiment_metrics["actual_candidates"] = len(candidates)
+    else:
+        candidates = translator(normalized_source, source_language, target_language, candidate_count)
+
+    def verify_candidate(candidate):
+        started = monotonic_ns() if experiment_metrics is not None else None
+        try:
+            evidence = call_with_supported_kwargs(
+                verifier,
+                text, candidate, source_language, target_language,
+                clarification=clarification,
+                semantic_constraint=semantic_constraint,
+                context=context,
+                tone=tone,
+                language_confidence=request.voice_confidence,
+                request=request,
+            )
+        finally:
+            if experiment_metrics is not None:
+                experiment_metrics["verification_ms"] += (
+                    monotonic_ns() - started
+                ) / 1_000_000
+        if experiment_metrics is not None and isinstance(evidence, dict):
+            status = evidence.get("status")
+            if status == "PASS":
+                experiment_metrics["pass_count"] += 1
+            elif status == "REVIEW":
+                experiment_metrics["review_count"] += 1
+        return evidence
+
     ranked = select_best_candidate(
         candidates,
-        lambda candidate: call_with_supported_kwargs(
-            verifier,
-            text, candidate, source_language, target_language,
-            clarification=clarification,
-            semantic_constraint=semantic_constraint,
-            context=context,
-            tone=tone,
-            language_confidence=request.voice_confidence,
-            request=request,
-        ),
+        verify_candidate,
         ambiguity_detected=request.ambiguity_detected is True or bool(clarification),
         language_confidence=request.voice_confidence,
         request=request,
     )
+    if experiment_metrics is not None:
+        evaluated = ranked["candidates"]
+        selected = ranked.get("selected")
+        experiment_metrics["verified_candidates"] = len(evaluated)
+        if selected is not None:
+            experiment_metrics["selected_index"] = evaluated.index(selected)
+            experiment_metrics["selected_evidence_score"] = selected["evidence_score"]
+            experiment_metrics["selected_risk_index"] = (
+                selected.get("risk") or {}
+            ).get("score")
     request.translation = ranked["translation"]
     request.candidates = ranked["candidates"]
     return ranked
